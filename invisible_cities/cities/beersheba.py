@@ -22,6 +22,7 @@ from numpy       import nan_to_num
 
 from typing      import Tuple
 from typing      import List
+from typing import Callable
 
 from enum        import auto
 
@@ -32,6 +33,7 @@ from .  components import print_every
 from .  components import cdst_from_files
 
 from .  esmeralda  import summary_writer
+from .  esmeralda  import track_writer
 
 from .. reco                   import tbl_functions           as tbl
 from .. dataflow               import dataflow                as fl
@@ -52,9 +54,111 @@ from .. io.          dst_io    import load_dst
 
 from .. evm.event_model        import HitEnergy
 
+from .. evm                    import event_model as evm
+from .. reco                   import paolina_functions as plf
+
 from .. types.ic_types         import AutoNameEnumBase
+from .. types.ic_types         import xy
 
 from .. core                   import system_of_units as units
+
+
+def convert_true_to_hits(x, y, z, e):
+    return [evm.Hit(0, evm.Cluster(0, xy(xx, yy), xy(0,0), 0), zz, ee, xy(0, 0))
+            for xx, yy, zz, ee in zip(x, y, z, e)]
+
+
+def track_blob_info_creator_extractor(vox_size : [float, float, float],
+                                      energy_type : evm.HitEnergy,
+                                      strict_vox_size : bool,
+                                      energy_threshold : float,
+                                      min_voxels : int,
+                                      blob_radius : float) -> Callable:
+    """ Wrapper of extract_track_blob_info"""
+    def create_extract_track_blob_info(hitcol):
+        """This function extract relevant info about the tracks and blobs, as well as assigning new field of energy, track_id etc to the HitCollection object (NOTE: we don't want to erase any hits, just redifine some attributes. If we need to cut away some hits to apply paolina functions, it has to be on the copy of the original hits)"""
+
+        hitc = evm.HitCollection(hitcol.event.unique()[0], 0)
+        hitc.hits = convert_true_to_hits(hitcol['X'].values, hitcol['Y'].values, hitcol['Z'].values, hitcol['E'].values) 
+
+        voxels     = plf.voxelize_hits(hitc.hits, vox_size, strict_vox_size, energy_type)
+        if energy_threshold == 0.:
+            mod_voxels = voxels
+        else:
+            (mod_voxels, dropped_voxels) = plf.drop_end_point_voxels(voxels, energy_threshold, min_voxels)
+        tracks     = plf.make_track_graphs(mod_voxels)
+
+        vox_size_x = voxels[0].size[0]
+        vox_size_y = voxels[0].size[1]
+        vox_size_z = voxels[0].size[2]
+
+        #sort tracks in energy
+        tracks     = sorted(tracks, key = lambda t: sum([vox.Ehits for vox in t.nodes()]), reverse = True)
+
+        track_hits = []
+        df = pd.DataFrame(columns=['event', 'trackID', 'energy', 'length', 'numb_of_voxels',
+                                   'numb_of_hits', 'numb_of_tracks', 'x_min', 'y_min', 'z_min',
+                                   'x_max', 'y_max', 'z_max', 'r_max', 'x_ave', 'y_ave', 'z_ave',
+                                   'extreme1_x', 'extreme1_y', 'extreme1_z',
+                                   'extreme2_x', 'extreme2_y', 'extreme2_z',
+                                   'blob1_x', 'blob1_y', 'blob1_z',
+                                   'blob2_x', 'blob2_y', 'blob2_z',
+                                   'eblob1', 'eblob2', 'ovlp_blob_energy',
+                                   'vox_size_x', 'vox_size_y', 'vox_size_z'])
+        hitsblob1 = []
+        hitsblob2 = []
+        for c, t in enumerate(tracks, 0):
+            tID = c
+            energy = sum([vox.Ehits for vox in t.nodes()])
+            length = plf.length(t)
+            numb_of_hits = len([h for vox in t.nodes() for h in vox.hits])
+            numb_of_voxels = len(t.nodes())
+            numb_of_tracks = len(tracks   )
+
+            min_x = min([h.X for v in t.nodes() for h in v.hits])
+            max_x = max([h.X for v in t.nodes() for h in v.hits])
+            min_y = min([h.Y for v in t.nodes() for h in v.hits])
+            max_y = max([h.Y for v in t.nodes() for h in v.hits])
+            min_z = min([h.Z for v in t.nodes() for h in v.hits])
+            max_z = max([h.Z for v in t.nodes() for h in v.hits])
+            max_r = max([np.sqrt(h.X*h.X + h.Y*h.Y) for v in t.nodes() for h in v.hits])
+
+            pos = [h.pos for v in t.nodes() for h in v.hits]
+            e   = [getattr(h, energy_type.value) for v in t.nodes() for h in v.hits]
+            ave_pos = np.average(pos, weights=e, axis=0)
+
+            extr1, extr2 = plf.find_extrema(t)
+            extr1_pos = extr1.XYZ
+            extr2_pos = extr2.XYZ
+
+            blob_pos1, blob_pos2 = plf.blob_centres(t, blob_radius)
+
+            e_blob1, e_blob2, hits_blob1, hits_blob2 = plf.blob_energies_and_hits(t, blob_radius)
+            hitsblob1.append(hits_blob1)
+            hitsblob2.append(hits_blob2)
+            overlap = float(sum([h.E for h in set(hits_blob1).intersection(hits_blob2)]))
+            list_of_vars = [hitc.event, tID, energy, length, numb_of_voxels, numb_of_hits, numb_of_tracks, min_x, min_y, min_z, max_x, max_y, max_z, max_r, ave_pos[0], ave_pos[1], ave_pos[2], extr1_pos[0], extr1_pos[1], extr1_pos[2], extr2_pos[0], extr2_pos[1], extr2_pos[2], blob_pos1[0], blob_pos1[1], blob_pos1[2], blob_pos2[0], blob_pos2[1], blob_pos2[2], e_blob1, e_blob2, overlap, vox_size_x, vox_size_y, vox_size_z]
+
+            df.loc[c] = list_of_vars
+            try:
+                types_dict
+            except NameError:
+                types_dict = dict(zip(df.columns, [type(x) for x in list_of_vars]))
+
+            for vox in t.nodes():
+                for hit in vox.hits:
+                    hit.track_id = tID
+                    track_hits.append(hit)
+
+
+        track_hitc = evm.HitCollection(hitc.event, hitc.time)
+        track_hitc.hits = track_hits
+        #change dtype of columns to match type of variables
+        df = df.apply(lambda x : x.astype(types_dict[x.name]))
+
+        return df, track_hitc, mod_voxels
+
+    return create_extract_track_blob_info
 
 
 class CutType          (AutoNameEnumBase):
@@ -307,7 +411,7 @@ def deconv_writer(h5out, compression='ZLIB4'):
 
 @city
 def beersheba(files_in, file_out, compression, event_range, print_mod, detector_db, run_number,
-              deconv_params = dict()):
+              deconv_params = dict(), paolina_params = dict()):
     """
     The city corrects Penthesilea hits energy and extracts topology information.
     ----------
@@ -384,6 +488,8 @@ def beersheba(files_in, file_out, compression, event_range, print_mod, detector_
 
     deconv_params['psf_fname'   ] = expandvars(deconv_params['psf_fname'])
 
+    paolina_params['energy_type'] = HitEnergy(paolina_params['energy_type'])
+
     for p in ['sample_width', 'bin_size', 'diffusion']:
         if len(deconv_params[p]) != deconv_params['n_dim']:
             raise ValueError         (f"Parameter {p} dimensions do not match n_dim parameter")
@@ -400,6 +506,9 @@ def beersheba(files_in, file_out, compression, event_range, print_mod, detector_
     deconvolve_events     = fl.map(deconvolve_signal(**deconv_params),
                                    args = 'cdst',
                                    out  = 'deconv_dst')
+    create_extract_track_blob_info  = fl.map(track_blob_info_creator_extractor(**paolina_params),
+                                             args = 'deconv_dst',
+                                             out  = ('topology_info', 'paolina_hits', 'out_of_map'))
 
     event_count_in        = fl.spy_count()
     event_count_out       = fl.spy_count()
@@ -411,6 +520,7 @@ def beersheba(files_in, file_out, compression, event_range, print_mod, detector_
         # Define writers
         write_event_info = fl.sink(run_and_event_writer(h5out), args=("run_number", "event_number", "timestamp"))
         write_deconv     = fl.sink(  deconv_writer(h5out=h5out), args =  "deconv_dst"         )
+        write_tracks     = fl.sink(  track_writer(h5out=h5out),  args =  "topology_info"      )
         write_summary    = fl.sink( summary_writer(h5out=h5out), args =  "summary"            )
         result = push(source = cdst_from_files(files_in),
                       pipe   = pipe(fl.slice(*event_range, close_all=True)    ,
@@ -421,10 +531,12 @@ def beersheba(files_in, file_out, compression, event_range, print_mod, detector_
                                     filter_events_no_hits                     ,
                                     events_passed_no_hits    .filter          ,
                                     deconvolve_events                         ,
+                                    create_extract_track_blob_info            ,
                                     event_count_out.spy                       ,
                                     fl.branch("event_number"     ,
                                               evtnum_collect.sink)            ,
                                     fl.fork(write_deconv    ,
+                                            write_tracks    ,
                                             write_summary   ,
                                             write_event_info))                ,
                       result = dict(events_in   = event_count_in       .future,
