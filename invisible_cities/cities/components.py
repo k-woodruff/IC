@@ -365,6 +365,38 @@ def cdst_from_files(paths: List[str]) -> Iterator[Dict[str,Union[pd.DataFrame, M
             # it needs to be given the WHOLE TABLE (rather than a
             # single event) at a time.
 
+def cdst_and_kdst_from_files(paths: List[str]) -> Iterator[Dict[str,Union[pd.DataFrame, MCInfo, int, float]]]:
+    """Reader of the files, yields collected hits,
+       pandas DataFrame with kdst info, mc_info, run_number, event_number and timestamp"""
+    for path in paths:
+        try:
+            cdst_df    = load_dst (path,   'CHITS', 'lowTh')
+            summary_df = load_dst (path, 'Summary', 'Events')
+            kdst_df    = load_dst (path, 'DST' , 'Events')
+        except tb.exceptions.NoSuchNodeError:
+            continue
+
+        with tb.open_file(path, "r") as h5in:
+            try:
+                run_number  = get_run_number(h5in)
+                event_info  = get_event_info(h5in)
+                evts, _     = zip(*event_info[:])
+                bool_mask   = np.in1d(evts, cdst_df.event.unique())
+                event_info  = event_info[bool_mask]
+            except (tb.exceptions.NoSuchNodeError, IndexError):
+                continue
+            check_lengths(event_info, cdst_df.event.unique())
+            for evtinfo in event_info:
+                event_number, timestamp = evtinfo
+                yield dict(cdst    = cdst_df   .loc[cdst_df   .event==event_number],
+                           kdst = kdst_df.loc[kdst_df.event==event_number],
+                           summary = summary_df.loc[summary_df.event==event_number],
+                           run_number=run_number,
+                           event_number=event_number, timestamp=timestamp)
+            # NB, the monte_carlo writer is different from the others:
+            # it needs to be given the WHOLE TABLE (rather than a
+            # single event) at a time.
+
 def hits_and_kdst_from_files(paths: List[str]) -> Iterator[Dict[str,Union[HitCollection, pd.DataFrame, MCInfo, int, float]]]:
     """Reader of the files, yields HitsCollection, pandas DataFrame with
     kdst info, run_number, event_number and timestamp."""

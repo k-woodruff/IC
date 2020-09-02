@@ -30,10 +30,11 @@ from .  components import city
 from .  components import collect
 from .  components import copy_mc_info
 from .  components import print_every
-from .  components import cdst_from_files
+from .  components import cdst_and_kdst_from_files
 
 from .  esmeralda  import summary_writer
 from .  esmeralda  import track_writer
+from .  esmeralda  import kdst_from_df_writer
 
 from .. reco                   import tbl_functions           as tbl
 from .. dataflow               import dataflow                as fl
@@ -521,8 +522,9 @@ def beersheba(files_in, file_out, compression, event_range, print_mod, detector_
         write_event_info = fl.sink(run_and_event_writer(h5out), args=("run_number", "event_number", "timestamp"))
         write_deconv     = fl.sink(  deconv_writer(h5out=h5out), args =  "deconv_dst"         )
         write_tracks     = fl.sink(  track_writer(h5out=h5out),  args =  "topology_info"      )
+        write_kdst_table = fl.sink( kdst_from_df_writer(h5out),  args =  "kdst"               )
         write_summary    = fl.sink( summary_writer(h5out=h5out), args =  "summary"            )
-        result = push(source = cdst_from_files(files_in),
+        result = push(source = cdst_and_kdst_from_files(files_in),
                       pipe   = pipe(fl.slice(*event_range, close_all=True)    ,
                                     print_every(print_mod)                    ,
                                     event_count_in.spy                        ,
@@ -538,6 +540,7 @@ def beersheba(files_in, file_out, compression, event_range, print_mod, detector_
                                     fl.fork(write_deconv    ,
                                             write_tracks    ,
                                             write_summary   ,
+                                            write_kdst_table,
                                             write_event_info))                ,
                       result = dict(events_in   = event_count_in       .future,
                                     events_out  = event_count_out      .future,
